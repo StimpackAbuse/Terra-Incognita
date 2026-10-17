@@ -1,0 +1,259 @@
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.AI;
+using UnityEngine.InputSystem;
+using TerraIncognita.Unit;
+
+namespace TerraIncognita.Input
+{
+    /// <summary>
+    /// 마우스 우클릭을 감지하여 지면 판정 후, 선택된 유닛들에게 목적지 분산 오프셋을 적용한 실시간 이동 명령을 발행합니다.
+    /// 사용자가 선호하는 동심원(Concentric Rings) 분산 방식을 적용하며, 수학적 지면 교차 안전장치를 내장합니다.
+    /// </summary>
+    [DisallowMultipleComponent]
+    public class CommandController : MonoBehaviour
+    {
+        [Header("참조 설정")]
+        [Tooltip("렌더링을 담당하는 메인 카메라")]
+        [SerializeField] private Camera mainCamera;
+
+        [Header("지면 판정")]
+        [Tooltip("이동 명령을 받을 수 있는 지면 레이어마스크")]
+        [SerializeField] private LayerMask groundLayerMask = ~0;
+
+        [Header("동심원 목적지 분산 설정")]
+        [Tooltip("동심원 간격 및 유닛 간 최소 분산 거리 (m)")]
+        [SerializeField] private float slotSpacing = 1.6f;
+        [SerializeField] private GameObject destObj = null;
+
+        private static readonly Plane s_GroundPlane = new Plane(Vector3.up, Vector3.zero);
+
+        private void Awake()
+        {
+            if (mainCamera == null)
+            {
+                mainCamera = Camera.main;
+            }
+        }
+
+        private void Update()
+        {
+            HandleCommandInput();
+        }
+
+        private void HandleCommandInput()
+        {
+            Mouse mouse = Mouse.current;
+            if (mouse == null) return;
+
+            // 마우스 우클릭 입력 감지
+            if (mouse.rightButton.wasPressedThisFrame)
+            {
+                ExecuteMoveCommand(mouse.position.ReadValue());
+            }
+        }
+
+        /// <summary>
+        /// 화면 클릭 지점을 월드 지면 좌표로 변환하고 선택된 유닛들에게 분산 이동 명령을 전달합니다.
+        /// </summary>
+        private void ExecuteMoveCommand(Vector2 screenPosition)
+        {
+            if (SelectionManager.Instance == null) return;
+
+            if (mainCamera == null)
+            {
+                mainCamera = Camera.main;
+                if (mainCamera == null) return;
+            }
+
+            IReadOnlyList<TerraIncognita.Unit.Unit> selectedUnits = SelectionManager.Instance.SelectedUnits;
+            if (selectedUnits == null || selectedUnits.Count == 0)
+            {
+                return;
+            }
+
+            Ray ray = mainCamera.ScreenPointToRay(screenPosition);
+            Vector3 centerDestination = Vector3.zero;
+            bool hitFound = false;
+
+            // 1. RaycastAll을 통해 유닛 콜라이더를 뚫고 지면 콜라이더 탐색
+            RaycastHit[] hits = Physics.RaycastAll(ray, 1500f, groundLayerMask);
+            for (int i = 0; i < hits.Length; i++)
+            {
+                // 유닛 콜라이더가 아닌 지면 콜라이더 우선 채택
+                if (hits[i].collider.GetComponentInParent<TerraIncognita.Unit.Unit>() == null)
+                {
+                    centerDestination = hits[i].point;
+                    hitFound = true;
+                    break;
+                }
+            }
+
+            // 2. 콜라이더가 없거나 감지되지 않을 경우의 수학적 무한 평면(Y=0) 교차 안전장치
+            if (!hitFound)
+            {
+                if (s_GroundPlane.Raycast(ray, out float enter))
+                {
+                    centerDestination = ray.GetPoint(enter);
+                    hitFound = true;
+                }
+            }
+
+            if (hitFound)
+            {
+                IssueDispersedMoveCommand(selectedUnits, centerDestination);
+            }
+        }
+
+        private List<NavMeshAgent> GetSelectedAgents()
+        {
+            var agents = new List<NavMeshAgent>();
+
+            if (SelectionManager.Instance == null) return agents;
+
+            IReadOnlyList<TerraIncognita.Unit.Unit> selectedUnits = SelectionManager.Instance.SelectedUnits;
+            if (selectedUnits == null || selectedUnits.Count == 0) return agents;
+
+            foreach (var unit in selectedUnits)
+            {
+                if (unit == null) continue;
+
+                NavMeshAgent agent = unit.GetComponent<NavMeshAgent>();
+                if (agent != null && agent.isOnNavMesh)
+                {
+                    agents.Add(agent);
+                }
+            }
+            return agents;
+        }
+
+        /// <summary>
+        /// 동심원 슬롯 배치 알고리즘을 사용하여 유닛들에게 겹치지 않는 목적지를 할당합니다.
+        /// </summary>
+        private void IssueDispersedMoveCommand(IReadOnlyList<TerraIncognita.Unit.Unit> units, Vector3 center)
+        {
+            int unitCount = units.Count;
+            if (unitCount == 0) return;
+
+            if (unitCount == 1)
+            {
+                // 단일 유닛: 중심점으로 즉시 이동
+                UnitMovement movement = units[0].GetComponent<UnitMovement>();
+                if (movement != null)
+                {
+                    movement.MoveTo(center);
+                }
+                return;
+            }
+
+            // 동심원 슬롯 좌표 목록 생성
+            //List<Vector3> slots = GenerateConcentricSlots(center, unitCount, slotSpacing);
+            List<NavMeshAgent> selectedAgents = GetSelectedAgents();
+
+            Dictionary<NavMeshAgent, Vector3> slots =
+                FormationSlotGenerator.GenerateAndAssignSlots(
+                    center,
+                    selectedAgents,
+                    candidateStep: 0.5f,
+                    sampleRadius: 0.5f,
+                    maxRings: 100
+                );
+
+            foreach (var pair in slots)
+            {
+                pair.Key.SetDestination(pair.Value);
+            }
+
+            // 유닛별로 목적지 할당
+            /*for (int i = 0; i < unitCount; i++)
+            {
+                if (i >= slots.Count) break;
+
+                TerraIncognita.Unit.Unit unit = units[i];
+                if (unit == null) continue;
+
+                UnitMovement movement = unit.GetComponent<UnitMovement>();
+                if (movement != null)
+                {
+                    movement.MoveTo(slots[i]);
+                }
+            }*/
+        }
+
+        /// <summary>
+        /// 중심점을 기준으로 동심원 형태로 겹치지 않는 슬롯 위치들을 계산합니다.
+        /// </summary>
+        public static List<Vector3> GenerateConcentricSlots(Vector3 center, int count, float spacing)
+        {
+            List<Vector3> slots = new List<Vector3>(count);
+
+            if (count <= 0 || spacing <= 0f)
+                return slots;
+
+            // NavMesh 위의 유효한 위치를 찾는 최대 반경
+            const float sampleRadius = 1.0f;
+
+            // 슬롯 후보 탐색 제한
+            const int maxRings = 100;
+
+            // 0번째 슬롯도 검증
+            if (TryGetValidNavMeshPosition(
+                center, sampleRadius, out Vector3 validCenter))
+            {
+                slots.Add(validCenter);
+            }
+
+            if (slots.Count >= count)
+                return slots;
+
+            for (int currentRing = 1;
+                 currentRing <= maxRings && slots.Count < count;
+                 currentRing++)
+            {
+                float currentRadius = currentRing * spacing;
+                int slotsInRing = 6 * currentRing;
+                float angleStep = 360f / slotsInRing;
+
+                for (int i = 0;
+                     i < slotsInRing && slots.Count < count;
+                     i++)
+                {
+                    float angleRad = i * angleStep * Mathf.Deg2Rad;
+
+                    Vector3 candidate = center + new Vector3(
+                        Mathf.Cos(angleRad) * currentRadius,
+                        0f,
+                        Mathf.Sin(angleRad) * currentRadius
+                    );
+
+                    if (TryGetValidNavMeshPosition(
+                        candidate, sampleRadius, out Vector3 validPosition))
+                    {
+                        slots.Add(validPosition);
+                    }
+                }
+            }
+
+            return slots;
+        }
+
+        private static bool TryGetValidNavMeshPosition(
+            Vector3 candidate,
+            float sampleRadius,
+            out Vector3 validPosition)
+        {
+            if (NavMesh.SamplePosition(
+                candidate,
+                out NavMeshHit hit,
+                sampleRadius,
+                NavMesh.AllAreas))
+            {
+                validPosition = hit.position;
+                return true;
+            }
+
+            validPosition = Vector3.zero;
+            return false;
+        }
+    }
+}
