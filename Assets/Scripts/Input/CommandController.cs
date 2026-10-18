@@ -27,6 +27,11 @@ namespace TerraIncognita.Input
         [SerializeField] private float slotSpacing = 1.6f;
         [SerializeField] private GameObject destObj = null;
 
+        [Header("이동 대형")]
+        [Tooltip("이동 명령 시 기존 유닛 간 상대 간격에 적용할 비율")]
+        [Range(0.5f, 1f)]
+        [SerializeField] private float formationSpacingScale = 0.75f;
+
         [Header("대형 변형 감지")]
         [SerializeField] private float formationDeviationThreshold = 1.0f;
         [SerializeField] private float deformationCheckInterval = 0.25f;
@@ -317,7 +322,8 @@ namespace TerraIncognita.Input
                     selectedAgents,
                     candidateStep: 0.5f,
                     sampleRadius: 0.5f,
-                    maxRings: 100
+                    maxRings: 100,
+                    relativeSpacingScale: formationSpacingScale
                 );
 
             foreach (var pair in slots)

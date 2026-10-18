@@ -52,7 +52,8 @@ public static class FormationSlotGenerator
             List<NavMeshAgent> agents,
             float candidateStep = 0.5f,
             float sampleRadius = 0.5f,
-            int maxRings = 100)
+            int maxRings = 100,
+            float relativeSpacingScale = 1f)
     {
         var assignments =
             new Dictionary<NavMeshAgent, Vector3>();
@@ -63,6 +64,7 @@ public static class FormationSlotGenerator
         candidateStep = Mathf.Max(0.1f, candidateStep);
         sampleRadius = Mathf.Max(0.05f, sampleRadius);
         maxRings = Mathf.Max(0, maxRings);
+        relativeSpacingScale = Mathf.Clamp01(relativeSpacingScale);
 
         // 유효한 유닛만 수집한다.
         var validAgents = agents
@@ -100,9 +102,9 @@ public static class FormationSlotGenerator
                 agent.transform.position - formationCenter;
 
             Vector3 desiredPosition = center + new Vector3(
-                offset.x,
+                offset.x * relativeSpacingScale,
                 0f,
-                offset.z);
+                offset.z * relativeSpacingScale);
 
             units.Add(new UnitData(
                 agent,
