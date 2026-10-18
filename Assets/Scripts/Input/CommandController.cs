@@ -3,6 +3,7 @@ using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.InputSystem;
 using TerraIncognita.Unit;
+using System.Linq;
 
 namespace TerraIncognita.Input
 {
@@ -26,6 +27,21 @@ namespace TerraIncognita.Input
         [SerializeField] private float slotSpacing = 1.6f;
         [SerializeField] private GameObject destObj = null;
 
+        [Header("대형 변형 감지")]
+        [SerializeField] private float formationDeviationThreshold = 1.0f;
+        [SerializeField] private float deformationCheckInterval = 0.25f;
+        [SerializeField] private float deformationConfirmDuration = 0.75f;
+        [SerializeField] private float reassignmentCooldown = 1.5f;
+
+        private readonly List<NavMeshAgent> monitoredAgents = new();
+        private readonly Dictionary<NavMeshAgent, Vector3> formationBaseline = new();
+
+        private Vector3 monitoredDestination;
+        private float nextFormationCheckTime;
+        private float deformationStartTime = -1f;
+        private float nextReassignmentTime;
+        private bool monitoringFormation;
+
         private static readonly Plane s_GroundPlane = new Plane(Vector3.up, Vector3.zero);
 
         private void Awake()
@@ -39,6 +55,151 @@ namespace TerraIncognita.Input
         private void Update()
         {
             HandleCommandInput();
+            MonitorFormationDeformation();
+        }
+
+        private void BeginFormationMonitoring(List<NavMeshAgent> agents, Vector3 destination)
+        {
+            monitoredAgents.Clear();
+            formationBaseline.Clear();
+
+            foreach (var agent in agents)
+            {
+                if (agent == null || !agent.enabled || !agent.isOnNavMesh)
+                    continue;
+
+                monitoredAgents.Add(agent);
+                formationBaseline[agent] = agent.transform.position;
+            }
+
+            monitoredDestination = destination;
+            deformationStartTime = -1f;
+            nextFormationCheckTime = Time.time + deformationCheckInterval;
+            nextReassignmentTime = Time.time + reassignmentCooldown;
+            monitoringFormation = monitoredAgents.Count > 1;
+        }
+
+        private void MonitorFormationDeformation()
+        {
+            if (!monitoringFormation)
+                return;
+
+            if (Time.time < nextFormationCheckTime)
+                return;
+
+            nextFormationCheckTime =
+                Time.time + deformationCheckInterval;
+
+            monitoredAgents.RemoveAll(agent =>
+                agent == null ||
+                !agent.enabled ||
+                !agent.isOnNavMesh);
+
+            if (monitoredAgents.Count <= 1)
+            {
+                monitoringFormation = false;
+                return;
+            }
+
+            Vector3 currentCenter = Vector3.zero;
+            Vector3 baselineCenter = Vector3.zero;
+            int count = 0;
+
+            foreach (var agent in monitoredAgents)
+            {
+                if (!formationBaseline.TryGetValue(agent, out Vector3 baseline))
+                    continue;
+
+                currentCenter += agent.transform.position;
+                baselineCenter += baseline;
+                count++;
+            }
+
+            if (count <= 1)
+                return;
+
+            currentCenter /= count;
+            baselineCenter /= count;
+
+            Vector3 groupDisplacement = currentCenter - baselineCenter;
+
+            float maxDeviation = 0f;
+
+            foreach (var agent in monitoredAgents)
+            {
+                if (!formationBaseline.TryGetValue(agent, out Vector3 baseline))
+                    continue;
+
+                Vector3 expectedPosition = baseline + groupDisplacement;
+                Vector3 actualPosition = agent.transform.position;
+
+                float deviation = Vector3.Distance(
+                    new Vector3(actualPosition.x, 0f, actualPosition.z),
+                    new Vector3(expectedPosition.x, 0f, expectedPosition.z));
+
+                maxDeviation = Mathf.Max(maxDeviation, deviation);
+            }
+
+            if (maxDeviation >= formationDeviationThreshold)
+            {
+                if (deformationStartTime < 0f)
+                    deformationStartTime = Time.time;
+
+                if (Time.time - deformationStartTime >=
+                    deformationConfirmDuration &&
+                    Time.time >= nextReassignmentTime)
+                {
+                    ReassignFormationFromCurrentPositions();
+                }
+            }
+            else
+            {
+                deformationStartTime = -1f;
+            }
+        }
+
+        private void ReassignFormationFromCurrentPositions()
+        {
+            var activeAgents = monitoredAgents
+                .Where(agent =>
+                    agent != null &&
+                    agent.enabled &&
+                    agent.isOnNavMesh)
+                .ToList();
+
+            if (activeAgents.Count <= 1)
+            {
+                monitoringFormation = false;
+                return;
+            }
+
+            // FormationSlotGenerator는 현재 유닛 위치에서 대형 중심과
+            // 각 유닛의 상대 오프셋을 다시 계산한다.
+            var newSlots = FormationSlotGenerator.GenerateAndAssignSlots(
+                monitoredDestination,
+                activeAgents,
+                candidateStep: 0.5f,
+                sampleRadius: 0.5f,
+                maxRings: 100);
+
+            foreach (var pair in newSlots)
+            {
+                if (pair.Key == null || !pair.Key.isOnNavMesh)
+                    continue;
+
+                pair.Key.SetDestination(pair.Value);
+            }
+
+            // 새 대형을 기준으로 다시 감시한다.
+            formationBaseline.Clear();
+
+            foreach (var agent in activeAgents)
+            {
+                formationBaseline[agent] = agent.transform.position;
+            }
+
+            deformationStartTime = -1f;
+            nextReassignmentTime = Time.time + reassignmentCooldown;
         }
 
         private void HandleCommandInput()

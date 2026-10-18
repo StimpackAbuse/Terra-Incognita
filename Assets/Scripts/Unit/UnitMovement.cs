@@ -51,17 +51,21 @@ namespace TerraIncognita.Unit
             {
                 UpdateFallbackMovement();
             }
-            if (agent != null && agent.isOnNavMesh && agent.hasPath)
+            if (agent != null && agent.isOnNavMesh)
             {
-                if (agent.remainingDistance <= agent.stoppingDistance)
-                {
-                    Debug.Log("Unit has reached destination.");
-                    agent.avoidancePriority = navPriorityDuringStop;
-                }
-                else
-                {
-                    agent.avoidancePriority = navPriority;
-                }
+                SetAvoidancePriority();
+            }
+        }
+
+        protected void SetAvoidancePriority()
+        {
+            if (agent.remainingDistance <= agent.stoppingDistance)
+            {
+                agent.avoidancePriority = navPriorityDuringStop;
+            }
+            else
+            {
+                agent.avoidancePriority = navPriority;
             }
         }
 
