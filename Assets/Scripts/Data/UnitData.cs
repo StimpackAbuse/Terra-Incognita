@@ -35,6 +35,9 @@ namespace TerraIncognita.Data
         [Tooltip("유닛 충돌 및 점유 반경")]
         [SerializeField] private float radius = 0.5f;
 
+        [Header("전투 및 공격 스펙")]
+        [SerializeField] private float attackRange = 3f;
+
         // 속성 접근자 (Read-only)
         public string UnitId => unitId;
         public string UnitName => unitName;
@@ -44,5 +47,6 @@ namespace TerraIncognita.Data
         public float Acceleration => acceleration;
         public float StoppingDistance => stoppingDistance;
         public float Radius => radius;
+        public float AttackRange => attackRange;
     }
 }

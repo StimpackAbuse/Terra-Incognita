@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.AI;
 using TerraIncognita.Data;
+using System.Collections.Generic;
 
 namespace TerraIncognita.Unit
 {
@@ -14,12 +15,13 @@ namespace TerraIncognita.Unit
     {
         [SerializeField] private int navPriority = 50;
         [SerializeField] private int navPriorityDuringStop = 100;
+        [SerializeField] private int navPriorityDuringAttack = 30;
         private NavMeshAgent agent;
         private Unit unit;
 
         // 폴백 이동 제어 변수
-        private bool isFallbackMoving;
-        private Vector3 fallbackTargetPosition;
+        private bool isFallbackMoving, attackMove, engaging;
+        private Vector3 fallbackTargetPosition, lastDestination;
 
         public bool IsMoving
         {
@@ -55,6 +57,45 @@ namespace TerraIncognita.Unit
             {
                 SetAvoidancePriority();
             }
+            if (attackMove)
+            {
+                AttackDuringMove();
+            }
+        }
+
+        protected void AttackDuringMove()
+        {
+            var objects = Physics.OverlapSphere(transform.position, unit.Data.AttackRange);
+            var enemyUnits = new List<Unit>();
+            foreach (var obj in objects)
+            {
+                if (obj.TryGetComponent<Unit>(out Unit otherUnit))
+                {
+                    if (otherUnit != unit && otherUnit.CompareTag("Enemy"))
+                    {
+                        enemyUnits.Add(otherUnit);
+                    }
+                }
+            }
+            if (enemyUnits.Count > 0)
+            {
+                // 가장 가까운 적 유닛을 공격 대상으로 선택
+                Unit closestEnemy = null;
+                float closestDistance = float.MaxValue;
+                foreach (var enemy in enemyUnits)
+                {
+                    float distance = Vector3.Distance(transform.position, enemy.transform.position);
+                    if (distance < closestDistance)
+                    {
+                        closestDistance = distance;
+                        closestEnemy = enemy;
+                    }
+                }
+                if (closestEnemy != null)
+                {
+                    AttackTarget(closestEnemy);
+                }
+            }
         }
 
         protected void SetAvoidancePriority()
@@ -63,10 +104,30 @@ namespace TerraIncognita.Unit
             {
                 agent.avoidancePriority = navPriorityDuringStop;
             }
+            if (engaging)
+            {
+                agent.avoidancePriority = navPriorityDuringAttack;
+            }
             else
             {
                 agent.avoidancePriority = navPriority;
             }
+        }
+
+        protected virtual void AttackTarget(Unit target)
+        {
+            if (target == null) return;
+
+            engaging = true;
+            lastDestination = agent.destination;
+            agent.ResetPath();
+            // 공격 로직 구현
+            Debug.Log($"{unit.Data.UnitName} is attacking {target.Data.UnitName}");
+        }
+
+        public void ToggleAttackMove(bool enable)
+        {
+            attackMove = enable;
         }
 
         /// <summary>

@@ -209,13 +209,39 @@ namespace TerraIncognita.Input
 
         private void HandleCommandInput()
         {
+            Keyboard keyboard = Keyboard.current;
             Mouse mouse = Mouse.current;
             if (mouse == null) return;
 
             // 마우스 우클릭 입력 감지
             if (mouse.rightButton.wasPressedThisFrame)
             {
+                ToggleAttackMoveForSelectedUnits(false);
                 ExecuteMoveCommand(mouse.position.ReadValue());
+            }
+            if (keyboard.aKey.wasPressedThisFrame)
+            {
+                ToggleAttackMoveForSelectedUnits(true);
+                ExecuteMoveCommand(mouse.position.ReadValue());
+            }
+        }
+
+        private void ToggleAttackMoveForSelectedUnits(bool enable)
+        {
+            if (SelectionManager.Instance == null) return;
+
+            IReadOnlyList<TerraIncognita.Unit.Unit> selectedUnits = SelectionManager.Instance.SelectedUnits;
+            if (selectedUnits == null || selectedUnits.Count == 0) return;
+
+            foreach (var unit in selectedUnits)
+            {
+                if (unit == null) continue;
+
+                UnitMovement movement = unit.GetComponent<UnitMovement>();
+                if (movement != null)
+                {
+                    movement.ToggleAttackMove(enable);
+                }
             }
         }
 
