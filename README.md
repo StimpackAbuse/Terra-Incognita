@@ -1,4 +1,4 @@
 # Terra Incognita
 Eradicate the natives. Repeat our history.
 
-[Devlog(in Korean)](https://velog.io/@luke0103/series/Terra-Incognita)
+[Devlog(in Korean)](https://velog.io/@stimpack/series/Terra-Incognita)
