@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.AI;
 using TerraIncognita.Data;
+using TerraIncognita.World;
 
 namespace TerraIncognita.Unit
 {
@@ -26,6 +27,7 @@ namespace TerraIncognita.Unit
         [SerializeField] private int navPriorityDuringStop = 100;
         private NavMeshAgent agent;
         private Unit unit, lastTarget, currentTarget;
+        private PeriodicTerrainWorld periodicWorld;
 
         // 폴백 이동 제어 변수
         private bool isFallbackMoving, patrolMovingToEnd;
@@ -50,6 +52,7 @@ namespace TerraIncognita.Unit
         {
             agent = GetComponent<NavMeshAgent>();
             unit = GetComponent<Unit>();
+            periodicWorld = FindFirstObjectByType<PeriodicTerrainWorld>();
         }
 
         private void Start()
@@ -61,6 +64,44 @@ namespace TerraIncognita.Unit
         {
             if (unit == null || unit.Data == null)
                 return;
+
+            if (agent != null &&
+                agent.enabled &&
+                periodicWorld != null &&
+                periodicWorld.TryWrapAgent(agent))
+            {
+                lastDestination = new Vector3(float.NaN, float.NaN, float.NaN);
+                patrolStart = periodicWorld.GetNearestWrappedPosition(
+                    transform.position,
+                    patrolStart);
+                if (currentTarget != null)
+                    TrackCurrentTarget();
+                else if (currentCommand == UnitCommand.Move ||
+                         currentCommand == UnitCommand.AttackMove ||
+                         currentCommand == UnitCommand.Patrol)
+                    SetMovementDestination(commandDestination, true);
+            }
+            else if ((agent == null || !agent.enabled || !agent.isOnNavMesh) &&
+                     periodicWorld != null)
+            {
+                Vector3 wrappedPosition = transform.position;
+                if (periodicWorld.TryWrapPosition(ref wrappedPosition))
+                {
+                    transform.position = wrappedPosition;
+                    patrolStart = periodicWorld.GetNearestWrappedPosition(
+                        transform.position,
+                        patrolStart);
+                    if (currentCommand == UnitCommand.Move ||
+                        currentCommand == UnitCommand.AttackMove ||
+                        currentCommand == UnitCommand.Patrol)
+                    {
+                        fallbackTargetPosition = periodicWorld.GetNearestWrappedPosition(
+                            transform.position,
+                            commandDestination);
+                        fallbackTargetPosition.y = transform.position.y;
+                    }
+                }
+            }
 
             // NavMeshAgent가 사용 불가능할 때 동작하는 실시간 직접 이동 폴백
             if (isFallbackMoving)
@@ -166,12 +207,12 @@ namespace TerraIncognita.Unit
         private bool IsTargetTrackable(Unit target)
         {
             return IsEnemy(target) &&
-                   Vector3.Distance(transform.position, target.transform.position) <= unit.Data.TrackingRange;
+                   GetWorldDistance(transform.position, target.transform.position) <= unit.Data.TrackingRange;
         }
 
         private void TrackCurrentTarget()
         {
-            float distance = Vector3.Distance(transform.position, currentTarget.transform.position);
+            float distance = GetWorldDistance(transform.position, currentTarget.transform.position);
             if (distance <= unit.Data.AttackRange)
             {
                 if (IsMoving)
@@ -263,8 +304,10 @@ namespace TerraIncognita.Unit
             SetMovementDestination(currentWaypoint, true);
         }
 
-        private static float HorizontalDistance(Vector3 first, Vector3 second)
+        private float HorizontalDistance(Vector3 first, Vector3 second)
         {
+            if (periodicWorld != null)
+                second = periodicWorld.GetNearestWrappedPosition(first, second);
             first.y = 0f;
             second.y = 0f;
             return Vector3.Distance(first, second);
@@ -406,6 +449,9 @@ namespace TerraIncognita.Unit
                 return;
 
             lastDestination = destination;
+            Vector3 navigationDestination = periodicWorld != null
+                ? periodicWorld.GetNearestWrappedPosition(transform.position, destination)
+                : destination;
             // 1. NavMeshAgent가 NavMesh 위에 유효하게 배치되어 있는지 확인
             if (agent != null)
             {
@@ -419,9 +465,9 @@ namespace TerraIncognita.Unit
 
                 if (agent.isOnNavMesh)
                 {
-                    Vector3 targetPos = destination;
+                    Vector3 targetPos = navigationDestination;
                     bool sampledDestination = NavMesh.SamplePosition(
-                        destination, out NavMeshHit destHit, 3.0f, NavMesh.AllAreas);
+                        navigationDestination, out NavMeshHit destHit, 3.0f, NavMesh.AllAreas);
                     if (sampledDestination)
                     {
                         targetPos = destHit.position;
@@ -451,9 +497,17 @@ namespace TerraIncognita.Unit
             }
 
             // 2. NavMesh가 없는 환경에서의 안전한 직접 이동 폴백
-            fallbackTargetPosition = destination;
+            fallbackTargetPosition = navigationDestination;
             fallbackTargetPosition.y = transform.position.y; // 동일 지면 높이 유지
             isFallbackMoving = true;
+        }
+
+        private float GetWorldDistance(Vector3 first, Vector3 second)
+        {
+            Vector3 nearest = periodicWorld != null
+                ? periodicWorld.GetNearestWrappedPosition(first, second)
+                : second;
+            return Vector3.Distance(first, nearest);
         }
 
         private void UpdateFallbackMovement()
