@@ -20,3 +20,4 @@ MonoBehaviour:
   acceleration: 16
   stoppingDistance: 0.2
   radius: 0.5
+  attackRange: 10

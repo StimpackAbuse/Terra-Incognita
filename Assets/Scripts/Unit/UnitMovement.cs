@@ -1,10 +1,19 @@
 using UnityEngine;
 using UnityEngine.AI;
 using TerraIncognita.Data;
-using System.Collections.Generic;
 
 namespace TerraIncognita.Unit
 {
+    public enum UnitCommand
+    {
+        Move,
+        AttackMove,
+        Attack,
+        Stop,
+        HoldPosition,
+        Patrol
+    }
+
     /// <summary>
     /// NavMeshAgent를 기반으로 실시간 이동 및 회전을 제어합니다.
     /// NavMesh가 준비되지 않은 환경에서도 동작을 보장하는 부드러운 실시간 폴백(Fallback) 이동을 내장합니다.
@@ -15,13 +24,15 @@ namespace TerraIncognita.Unit
     {
         [SerializeField] private int navPriority = 50;
         [SerializeField] private int navPriorityDuringStop = 100;
-        [SerializeField] private int navPriorityDuringAttack = 30;
         private NavMeshAgent agent;
-        private Unit unit;
+        private Unit unit, lastTarget, currentTarget;
 
         // 폴백 이동 제어 변수
-        private bool isFallbackMoving, attackMove, engaging;
-        private Vector3 fallbackTargetPosition, lastDestination;
+        private bool isFallbackMoving, patrolMovingToEnd;
+        private Vector3 fallbackTargetPosition, lastDestination, commandDestination, patrolStart;
+        private float nextPatrolPathRetryTime;
+        private float nextPatrolDiagnosticTime;
+        private UnitCommand currentCommand = UnitCommand.Stop;
 
         public bool IsMoving
         {
@@ -48,6 +59,9 @@ namespace TerraIncognita.Unit
 
         private void Update()
         {
+            if (unit == null || unit.Data == null)
+                return;
+
             // NavMeshAgent가 사용 불가능할 때 동작하는 실시간 직접 이동 폴백
             if (isFallbackMoving)
             {
@@ -57,44 +71,228 @@ namespace TerraIncognita.Unit
             {
                 SetAvoidancePriority();
             }
-            if (attackMove)
+            if (currentTarget != null)
             {
-                AttackDuringMove();
+                if (!IsTargetTrackable(currentTarget))
+                {
+                    LoseCurrentTarget();
+                }
+                else
+                {
+                    TrackCurrentTarget();
+                    return;
+                }
+            }
+
+            switch (currentCommand)
+            {
+                case UnitCommand.AttackMove:
+                case UnitCommand.Stop:
+                case UnitCommand.Patrol:
+                    TryAcquireTarget(unit.Data.SenseRange);
+                    break;
+                case UnitCommand.HoldPosition:
+                    AttackNearestTargetInRange();
+                    break;
+            }
+
+            if (currentCommand == UnitCommand.Patrol)
+                UpdatePatrol();
+        }
+
+        private void TryAcquireTarget(float range)
+        {
+            Unit closestEnemy = null;
+            float closestDistance = range;
+            var objects = Physics.OverlapSphere(transform.position, range);
+            foreach (var obj in objects)
+            {
+                Unit otherUnit = obj.GetComponentInParent<Unit>();
+                if (!IsEnemy(otherUnit))
+                    continue;
+
+                float distance = Vector3.Distance(transform.position, otherUnit.transform.position);
+                if (distance <= closestDistance)
+                {
+                    closestDistance = distance;
+                    closestEnemy = otherUnit;
+                }
+            }
+
+            if (closestEnemy != currentTarget)
+            {
+                currentTarget = closestEnemy;
+                if (currentTarget != null)
+                {
+                    Debug.Log(
+                        $"[UnitMovement:{name}] Acquired {currentTarget.name} while {currentCommand}; " +
+                        $"distance={closestDistance:F2}, senseRange={range:F2}.",
+                        this);
+                }
             }
         }
 
-        protected void AttackDuringMove()
+        private void AttackNearestTargetInRange()
         {
+            Unit closestEnemy = null;
+            float closestDistance = float.MaxValue;
             var objects = Physics.OverlapSphere(transform.position, unit.Data.AttackRange);
-            var enemyUnits = new List<Unit>();
             foreach (var obj in objects)
             {
-                if (obj.TryGetComponent<Unit>(out Unit otherUnit))
+                Unit otherUnit = obj.GetComponentInParent<Unit>();
+                if (!IsEnemy(otherUnit))
+                    continue;
+
+                float distance = Vector3.Distance(transform.position, otherUnit.transform.position);
+                if (distance <= unit.Data.AttackRange && distance < closestDistance)
                 {
-                    if (otherUnit != unit && otherUnit.CompareTag("Enemy"))
-                    {
-                        enemyUnits.Add(otherUnit);
-                    }
+                    closestDistance = distance;
+                    closestEnemy = otherUnit;
                 }
             }
-            if (enemyUnits.Count > 0)
+
+            if (closestEnemy != null)
+                AttackTarget(closestEnemy);
+            else
+                lastTarget = null;
+        }
+
+        private bool IsEnemy(Unit target)
+        {
+            return target != null && target != unit && target.isActiveAndEnabled &&
+                   target.CompareTag("Enemy");
+        }
+
+        private bool IsTargetTrackable(Unit target)
+        {
+            return IsEnemy(target) &&
+                   Vector3.Distance(transform.position, target.transform.position) <= unit.Data.TrackingRange;
+        }
+
+        private void TrackCurrentTarget()
+        {
+            float distance = Vector3.Distance(transform.position, currentTarget.transform.position);
+            if (distance <= unit.Data.AttackRange)
             {
-                // 가장 가까운 적 유닛을 공격 대상으로 선택
-                Unit closestEnemy = null;
-                float closestDistance = float.MaxValue;
-                foreach (var enemy in enemyUnits)
+                if (IsMoving)
+                    StopMovement();
+                AttackTarget(currentTarget);
+                return;
+            }
+
+            lastTarget = null;
+            SetMovementDestination(currentTarget.transform.position);
+        }
+
+        private void LoseCurrentTarget()
+        {
+            Debug.Log(
+                $"[UnitMovement:{name}] Lost target {currentTarget.name} at distance " +
+                $"{Vector3.Distance(transform.position, currentTarget.transform.position):F2}; " +
+                $"command={currentCommand}.",
+                this);
+            currentTarget = null;
+            lastTarget = null;
+            switch (currentCommand)
+            {
+                case UnitCommand.Attack:
+                case UnitCommand.Stop:
+                    StopMovement();
+                    break;
+                case UnitCommand.AttackMove:
+                    SetMovementDestination(commandDestination, true);
+                    break;
+                case UnitCommand.Patrol:
+                    SetMovementDestination(patrolMovingToEnd ? commandDestination : patrolStart, true);
+                    break;
+            }
+        }
+
+        private void UpdatePatrol()
+        {
+            if (isFallbackMoving)
+            {
+                LogPatrolState("using fallback movement");
+                return;
+            }
+
+            Vector3 currentWaypoint = patrolMovingToEnd ? commandDestination : patrolStart;
+            if (agent != null && agent.isOnNavMesh)
+            {
+                if (agent.pathPending)
                 {
-                    float distance = Vector3.Distance(transform.position, enemy.transform.position);
-                    if (distance < closestDistance)
+                    LogPatrolState($"path pending to {currentWaypoint}");
+                    return;
+                }
+
+                float arrivalDistance = agent.stoppingDistance + 0.1f;
+                if (agent.hasPath)
+                {
+                    if (agent.remainingDistance > arrivalDistance ||
+                        agent.velocity.sqrMagnitude > 0.01f)
                     {
-                        closestDistance = distance;
-                        closestEnemy = enemy;
+                        LogPatrolState($"following path to {currentWaypoint}");
+                        return;
                     }
                 }
-                if (closestEnemy != null)
+                else if (HorizontalDistance(transform.position, currentWaypoint) > arrivalDistance)
                 {
-                    AttackTarget(closestEnemy);
+                    if (Time.time >= nextPatrolPathRetryTime)
+                    {
+                        LogPatrolState($"no path; retrying waypoint {currentWaypoint}");
+                        SetMovementDestination(currentWaypoint, true);
+                        nextPatrolPathRetryTime = Time.time + 1f;
+                    }
+                    return;
                 }
+            }
+            else if (HorizontalDistance(transform.position, currentWaypoint) >
+                     Mathf.Max(unit.Data.StoppingDistance, 0.2f))
+            {
+                LogPatrolState($"no NavMeshAgent; waiting for fallback arrival at {currentWaypoint}");
+                return;
+            }
+
+            Vector3 previousWaypoint = currentWaypoint;
+            patrolMovingToEnd = !patrolMovingToEnd;
+            currentWaypoint = patrolMovingToEnd ? commandDestination : patrolStart;
+            Debug.Log(
+                $"[UnitMovement:{name}] Patrol waypoint reached at {transform.position}; " +
+                $"switching {previousWaypoint} -> {currentWaypoint}.",
+                this);
+            SetMovementDestination(currentWaypoint, true);
+        }
+
+        private static float HorizontalDistance(Vector3 first, Vector3 second)
+        {
+            first.y = 0f;
+            second.y = 0f;
+            return Vector3.Distance(first, second);
+        }
+
+        private void LogPatrolState(string state)
+        {
+            if (Time.time < nextPatrolDiagnosticTime)
+                return;
+
+            nextPatrolDiagnosticTime = Time.time + 1f;
+            if (agent != null)
+            {
+                Debug.Log(
+                    $"[UnitMovement:{name}] Patrol {state}; position={transform.position}, " +
+                    $"destination={agent.destination}, onNavMesh={agent.isOnNavMesh}, " +
+                    $"isStopped={agent.isStopped}, hasPath={agent.hasPath}, " +
+                    $"pathPending={agent.pathPending}, pathStatus={agent.pathStatus}, " +
+                    $"remainingDistance={agent.remainingDistance:F2}, " +
+                    $"stoppingDistance={agent.stoppingDistance:F2}, velocity={agent.velocity}.",
+                    this);
+            }
+            else
+            {
+                Debug.Log(
+                    $"[UnitMovement:{name}] Patrol {state}; position={transform.position}, " +
+                    $"fallbackMoving={isFallbackMoving}, fallbackDestination={fallbackTargetPosition}.",
+                    this);
             }
         }
 
@@ -104,10 +302,6 @@ namespace TerraIncognita.Unit
             {
                 agent.avoidancePriority = navPriorityDuringStop;
             }
-            if (engaging)
-            {
-                agent.avoidancePriority = navPriorityDuringAttack;
-            }
             else
             {
                 agent.avoidancePriority = navPriority;
@@ -116,18 +310,65 @@ namespace TerraIncognita.Unit
 
         protected virtual void AttackTarget(Unit target)
         {
-            if (target == null) return;
+            if (target == null || lastTarget == target)
+            {
+                return;
+            }
 
-            engaging = true;
-            lastDestination = agent.destination;
-            agent.ResetPath();
+            lastTarget = target;
             // 공격 로직 구현
-            Debug.Log($"{unit.Data.UnitName} is attacking {target.Data.UnitName}");
+            if (unit != null && unit.Data != null && target.Data != null)
+                Debug.Log($"{unit.Data.UnitName} is attacking {target.Data.UnitName}");
         }
 
-        public void ToggleAttackMove(bool enable)
+        public void IssueAttackCommand(Unit target)
         {
-            attackMove = enable;
+            if (!IsEnemy(target))
+            {
+                Stop();
+                return;
+            }
+
+            currentCommand = UnitCommand.Attack;
+            currentTarget = target;
+            lastTarget = null;
+            TrackCurrentTarget();
+        }
+
+        public void IssueCommand(UnitCommand command, Vector3 destination = default)
+        {
+            Debug.Log(
+                $"[UnitMovement:{name}] Command {command}; from={transform.position}, " +
+                $"destination={destination}, agentOnNavMesh={agent != null && agent.isOnNavMesh}.",
+                this);
+
+            currentCommand = command;
+            currentTarget = null;
+            lastTarget = null;
+            commandDestination = destination;
+
+            switch (command)
+            {
+                case UnitCommand.Move:
+                case UnitCommand.AttackMove:
+                    SetMovementDestination(destination, true);
+                    break;
+                case UnitCommand.Patrol:
+                    patrolStart = transform.position;
+                    patrolMovingToEnd = true;
+                    nextPatrolPathRetryTime = Time.time + 1f;
+                    nextPatrolDiagnosticTime = Time.time;
+                    Debug.Log(
+                        $"[UnitMovement:{name}] Patrol initialized; start={patrolStart}, end={destination}.",
+                        this);
+                    SetMovementDestination(destination, true);
+                    break;
+                case UnitCommand.Stop:
+                case UnitCommand.HoldPosition:
+                case UnitCommand.Attack:
+                    StopMovement();
+                    break;
+            }
         }
 
         /// <summary>
@@ -155,8 +396,16 @@ namespace TerraIncognita.Unit
         /// </summary>
         public bool MoveTo(Vector3 destination)
         {
-            float speed = unit != null && unit.Data != null ? unit.Data.MoveSpeed : 4.5f;
+            IssueCommand(UnitCommand.Move, destination);
+            return true;
+        }
 
+        private void SetMovementDestination(Vector3 destination, bool force = false)
+        {
+            if (!force && Vector3.Distance(lastDestination, destination) <= 0.5f && IsMoving)
+                return;
+
+            lastDestination = destination;
             // 1. NavMeshAgent가 NavMesh 위에 유효하게 배치되어 있는지 확인
             if (agent != null)
             {
@@ -171,19 +420,33 @@ namespace TerraIncognita.Unit
                 if (agent.isOnNavMesh)
                 {
                     Vector3 targetPos = destination;
-                    if (NavMesh.SamplePosition(destination, out NavMeshHit destHit, 3.0f, NavMesh.AllAreas))
+                    bool sampledDestination = NavMesh.SamplePosition(
+                        destination, out NavMeshHit destHit, 3.0f, NavMesh.AllAreas);
+                    if (sampledDestination)
                     {
                         targetPos = destHit.position;
                     }
 
                     agent.isStopped = false;
                     bool success = agent.SetDestination(targetPos);
+                    Debug.Log(
+                        $"[UnitMovement:{name}] SetDestination requested={destination}, " +
+                        $"sampled={sampledDestination}, actual={targetPos}, success={success}, " +
+                        $"isStopped={agent.isStopped}, hasPath={agent.hasPath}, " +
+                        $"pathPending={agent.pathPending}, pathStatus={agent.pathStatus}.",
+                        this);
                     if (success)
                     {
                         agent.avoidancePriority = navPriority;
                         isFallbackMoving = false;
-                        return true;
+                        return;
                     }
+                }
+                else
+                {
+                    Debug.LogWarning(
+                        $"[UnitMovement:{name}] Cannot set destination: NavMeshAgent is not on a NavMesh.",
+                        this);
                 }
             }
 
@@ -191,7 +454,6 @@ namespace TerraIncognita.Unit
             fallbackTargetPosition = destination;
             fallbackTargetPosition.y = transform.position.y; // 동일 지면 높이 유지
             isFallbackMoving = true;
-            return true;
         }
 
         private void UpdateFallbackMovement()
@@ -208,7 +470,8 @@ namespace TerraIncognita.Unit
             if (distance <= stopDist)
             {
                 isFallbackMoving = false;
-                agent.avoidancePriority = navPriorityDuringStop;
+                if (agent != null && agent.isOnNavMesh)
+                    agent.avoidancePriority = navPriorityDuringStop;
                 return;
             }
 
@@ -220,8 +483,10 @@ namespace TerraIncognita.Unit
             // 목적지로 전진
             float step = speed * Time.deltaTime;
             if (step > distance) step = distance;
-            //transform.position += moveDir * step;
-            agent.Move(moveDir * step);
+            if (agent != null && agent.isOnNavMesh)
+                agent.Move(moveDir * step);
+            else
+                transform.position += moveDir * step;
         }
 
         /// <summary>
@@ -229,13 +494,22 @@ namespace TerraIncognita.Unit
         /// </summary>
         public void Stop()
         {
+            currentCommand = UnitCommand.Stop;
+            currentTarget = null;
+            lastTarget = null;
+            StopMovement();
+        }
+
+        private void StopMovement()
+        {
             if (agent != null && agent.isOnNavMesh)
             {
                 agent.isStopped = true;
                 agent.ResetPath();
             }
             isFallbackMoving = false;
-            agent.avoidancePriority = navPriorityDuringStop;
+            if (agent != null && agent.isOnNavMesh)
+                agent.avoidancePriority = navPriorityDuringStop;
         }
 
         protected void OnCollisionStay(Collision collision)

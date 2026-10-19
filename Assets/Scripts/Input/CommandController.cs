@@ -211,44 +211,110 @@ namespace TerraIncognita.Input
         {
             Keyboard keyboard = Keyboard.current;
             Mouse mouse = Mouse.current;
-            if (mouse == null) return;
+            if (keyboard == null && mouse == null) return;
 
-            // 마우스 우클릭 입력 감지
-            if (mouse.rightButton.wasPressedThisFrame)
+            if (keyboard != null && keyboard.sKey.wasPressedThisFrame)
             {
-                ToggleAttackMoveForSelectedUnits(false);
-                ExecuteMoveCommand(mouse.position.ReadValue());
+                IssueImmediateCommand(UnitCommand.Stop);
             }
-            if (keyboard.aKey.wasPressedThisFrame)
+            if (keyboard != null && keyboard.hKey.wasPressedThisFrame)
             {
-                ToggleAttackMoveForSelectedUnits(true);
-                ExecuteMoveCommand(mouse.position.ReadValue());
+                IssueImmediateCommand(UnitCommand.HoldPosition);
             }
+
+            if (mouse == null || !mouse.rightButton.wasPressedThisFrame)
+                return;
+
+            UnitCommand command = keyboard != null && keyboard.aKey.isPressed
+                ? UnitCommand.AttackMove
+                : keyboard != null && keyboard.pKey.isPressed
+                    ? UnitCommand.Patrol
+                    : UnitCommand.Move;
+            int selectedCount = SelectionManager.Instance != null
+                ? SelectionManager.Instance.SelectedUnits.Count
+                : 0;
+            Debug.Log(
+                $"[CommandController] Right-click command={command}; " +
+                $"position={mouse.position.ReadValue()}, selectedUnits={selectedCount}, " +
+                $"frame={Time.frameCount}.",
+                this);
+
+            TerraIncognita.Unit.Unit target = command == UnitCommand.Move
+                ? GetEnemyAtScreenPosition(mouse.position.ReadValue())
+                : null;
+            if (target != null)
+            {
+                IssueAttackCommand(target);
+                return;
+            }
+
+            ExecuteMoveCommand(mouse.position.ReadValue(), command);
         }
 
-        private void ToggleAttackMoveForSelectedUnits(bool enable)
+        private void IssueImmediateCommand(UnitCommand command)
         {
-            if (SelectionManager.Instance == null) return;
+            if (SelectionManager.Instance == null)
+                return;
 
-            IReadOnlyList<TerraIncognita.Unit.Unit> selectedUnits = SelectionManager.Instance.SelectedUnits;
-            if (selectedUnits == null || selectedUnits.Count == 0) return;
-
-            foreach (var unit in selectedUnits)
+            foreach (var unit in SelectionManager.Instance.SelectedUnits)
             {
-                if (unit == null) continue;
+                if (unit == null)
+                    continue;
 
                 UnitMovement movement = unit.GetComponent<UnitMovement>();
                 if (movement != null)
+                    movement.IssueCommand(command);
+            }
+        }
+
+        private TerraIncognita.Unit.Unit GetEnemyAtScreenPosition(Vector2 screenPosition)
+        {
+            if (mainCamera == null)
+                mainCamera = Camera.main;
+            if (mainCamera == null)
+                return null;
+
+            Ray ray = mainCamera.ScreenPointToRay(screenPosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 1500f);
+            TerraIncognita.Unit.Unit closestEnemy = null;
+            float closestHitDistance = float.MaxValue;
+            foreach (RaycastHit hit in hits)
+            {
+                TerraIncognita.Unit.Unit hitUnit =
+                    hit.collider.GetComponentInParent<TerraIncognita.Unit.Unit>();
+                if (hitUnit == null || !hitUnit.CompareTag("Enemy"))
+                    continue;
+
+                if (hit.distance < closestHitDistance)
                 {
-                    movement.ToggleAttackMove(enable);
+                    closestHitDistance = hit.distance;
+                    closestEnemy = hitUnit;
                 }
+            }
+
+            return closestEnemy;
+        }
+
+        private void IssueAttackCommand(TerraIncognita.Unit.Unit target)
+        {
+            if (SelectionManager.Instance == null)
+                return;
+
+            foreach (var unit in SelectionManager.Instance.SelectedUnits)
+            {
+                if (unit == null)
+                    continue;
+
+                UnitMovement movement = unit.GetComponent<UnitMovement>();
+                if (movement != null)
+                    movement.IssueAttackCommand(target);
             }
         }
 
         /// <summary>
         /// 화면 클릭 지점을 월드 지면 좌표로 변환하고 선택된 유닛들에게 분산 이동 명령을 전달합니다.
         /// </summary>
-        private void ExecuteMoveCommand(Vector2 screenPosition)
+        private void ExecuteMoveCommand(Vector2 screenPosition, UnitCommand command)
         {
             if (SelectionManager.Instance == null) return;
 
@@ -293,7 +359,7 @@ namespace TerraIncognita.Input
 
             if (hitFound)
             {
-                IssueDispersedMoveCommand(selectedUnits, centerDestination);
+                IssueDispersedMoveCommand(selectedUnits, centerDestination, command);
             }
         }
 
@@ -322,7 +388,10 @@ namespace TerraIncognita.Input
         /// <summary>
         /// 동심원 슬롯 배치 알고리즘을 사용하여 유닛들에게 겹치지 않는 목적지를 할당합니다.
         /// </summary>
-        private void IssueDispersedMoveCommand(IReadOnlyList<TerraIncognita.Unit.Unit> units, Vector3 center)
+        private void IssueDispersedMoveCommand(
+            IReadOnlyList<TerraIncognita.Unit.Unit> units,
+            Vector3 center,
+            UnitCommand command)
         {
             int unitCount = units.Count;
             if (unitCount == 0) return;
@@ -333,7 +402,7 @@ namespace TerraIncognita.Input
                 UnitMovement movement = units[0].GetComponent<UnitMovement>();
                 if (movement != null)
                 {
-                    movement.MoveTo(center);
+                    movement.IssueCommand(command, center);
                 }
                 return;
             }
@@ -352,25 +421,21 @@ namespace TerraIncognita.Input
                     relativeSpacingScale: formationSpacingScale
                 );
 
-            foreach (var pair in slots)
+            foreach (var unit in units)
             {
-                pair.Key.SetDestination(pair.Value);
-            }
-
-            // 유닛별로 목적지 할당
-            /*for (int i = 0; i < unitCount; i++)
-            {
-                if (i >= slots.Count) break;
-
-                TerraIncognita.Unit.Unit unit = units[i];
-                if (unit == null) continue;
+                if (unit == null)
+                    continue;
 
                 UnitMovement movement = unit.GetComponent<UnitMovement>();
-                if (movement != null)
-                {
-                    movement.MoveTo(slots[i]);
-                }
-            }*/
+                if (movement == null)
+                    continue;
+
+                NavMeshAgent agent = unit.GetComponent<NavMeshAgent>();
+                Vector3 destination = agent != null && slots.TryGetValue(agent, out Vector3 slot)
+                    ? slot
+                    : center;
+                movement.IssueCommand(command, destination);
+            }
         }
 
         /// <summary>

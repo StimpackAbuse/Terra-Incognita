@@ -37,6 +37,12 @@ namespace TerraIncognita.Data
 
         [Header("전투 및 공격 스펙")]
         [SerializeField] private float attackRange = 3f;
+        [Tooltip("거리 내에서 자동으로 적을 발견하는 범위")]
+        [Min(0f)]
+        [SerializeField] private float senseRange = 12f;
+        [Tooltip("추적 중인 적이 이 거리를 벗어나면 추적을 중단하는 범위")]
+        [Min(0f)]
+        [SerializeField] private float trackingRange = 20f;
 
         // 속성 접근자 (Read-only)
         public string UnitId => unitId;
@@ -48,5 +54,7 @@ namespace TerraIncognita.Data
         public float StoppingDistance => stoppingDistance;
         public float Radius => radius;
         public float AttackRange => attackRange;
+        public float SenseRange => Mathf.Max(0f, senseRange);
+        public float TrackingRange => Mathf.Max(SenseRange, trackingRange);
     }
 }
