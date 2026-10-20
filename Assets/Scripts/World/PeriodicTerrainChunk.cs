@@ -1,15 +1,34 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using Unity.Profiling;
 
 namespace TerraIncognita.World
 {
     [DisallowMultipleComponent]
     public sealed class PeriodicTerrainChunk : MonoBehaviour
     {
+        private static readonly ProfilerMarker BuildMarker =
+            new ProfilerMarker("PeriodicTerrainChunk.Build");
+
+        private static readonly int[] OceanTriangles = { 0, 1, 2, 2, 1, 3 };
+        private static readonly List<Vector3> LandVertices = new List<Vector3>();
+        private static readonly List<Vector3> LandNormals = new List<Vector3>();
+        private static readonly List<Vector2> LandUvs = new List<Vector2>();
+        private static readonly List<int> LandTriangles = new List<int>();
+
         private Mesh terrainMesh;
         private Mesh landMesh;
         private Mesh oceanMesh;
+        private Vector3[] terrainVertices;
+        private Vector3[] terrainNormals;
+        private Vector2[] terrainUvs;
+        private int[] terrainTriangles;
+        private float[] sampledHeights;
+        private Vector3[] oceanVertices = new Vector3[4];
+        private readonly TerrainVertex[] clipInput = new TerrainVertex[8];
+        private readonly TerrainVertex[] clipOutput = new TerrainVertex[8];
+        private int bufferResolution = -1;
         private MeshFilter terrainFilter;
         private MeshRenderer terrainRenderer;
         private MeshCollider terrainCollider;
@@ -28,32 +47,31 @@ namespace TerraIncognita.World
             Material oceanMaterial,
             bool createCollider)
         {
-            EnsureComponents(createCollider);
-            ReleaseMeshes();
+            using (BuildMarker.Auto())
+            {
+                EnsureComponents(createCollider);
+                DetachMeshes();
+                EnsureBuffers(resolution);
 
-            name = $"Terrain Chunk ({chunkX}, {chunkZ})";
-            transform.position = new Vector3(chunkX * chunkSize, 0f, chunkZ * chunkSize);
+                name = $"Terrain Chunk ({chunkX}, {chunkZ})";
+                transform.position = new Vector3(chunkX * chunkSize, 0f, chunkZ * chunkSize);
 
-            terrainMesh = CreateTerrainMesh(
-                chunkX,
-                chunkZ,
-                chunkSize,
-                resolution,
-                noise);
-            landMesh = CreateLandMesh(terrainMesh, seaLevel);
-            terrainFilter.sharedMesh = terrainMesh;
-            terrainRenderer.sharedMaterial = terrainMaterial;
-            terrainRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
-            terrainRenderer.receiveShadows = true;
+                CreateTerrainMesh(chunkX, chunkZ, chunkSize, resolution, noise);
+                CreateLandMesh(seaLevel);
+                terrainFilter.sharedMesh = terrainMesh;
+                terrainRenderer.sharedMaterial = terrainMaterial;
+                terrainRenderer.shadowCastingMode = ShadowCastingMode.On;
+                terrainRenderer.receiveShadows = true;
 
-            if (terrainCollider != null)
-                terrainCollider.sharedMesh = landMesh;
+                if (terrainCollider != null)
+                    terrainCollider.sharedMesh = landMesh;
 
-            oceanMesh = CreateOceanMesh(chunkSize, seaLevel + 0.02f);
-            oceanFilter.sharedMesh = oceanMesh;
-            oceanRenderer.sharedMaterial = oceanMaterial;
-            oceanRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            oceanRenderer.receiveShadows = false;
+                CreateOceanMesh(chunkSize, seaLevel + 0.02f);
+                oceanFilter.sharedMesh = oceanMesh;
+                oceanRenderer.sharedMaterial = oceanMaterial;
+                oceanRenderer.shadowCastingMode = ShadowCastingMode.Off;
+                oceanRenderer.receiveShadows = false;
+            }
         }
 
         private void EnsureComponents(bool createCollider)
@@ -75,7 +93,7 @@ namespace TerraIncognita.World
             }
         }
 
-        private void ReleaseMeshes()
+        private void DetachMeshes()
         {
             if (terrainCollider != null)
                 terrainCollider.sharedMesh = null;
@@ -83,16 +101,6 @@ namespace TerraIncognita.World
                 terrainFilter.sharedMesh = null;
             if (oceanFilter != null)
                 oceanFilter.sharedMesh = null;
-            if (terrainMesh != null)
-                DestroyMesh(terrainMesh);
-            if (landMesh != null)
-                DestroyMesh(landMesh);
-            if (oceanMesh != null)
-                DestroyMesh(oceanMesh);
-
-            terrainMesh = null;
-            landMesh = null;
-            oceanMesh = null;
         }
 
         private static void DestroyMesh(Mesh mesh)
@@ -103,7 +111,7 @@ namespace TerraIncognita.World
                 DestroyImmediate(mesh);
         }
 
-        private Mesh CreateTerrainMesh(
+        private void CreateTerrainMesh(
             int chunkX,
             int chunkZ,
             float chunkSize,
@@ -111,12 +119,22 @@ namespace TerraIncognita.World
             PeriodicTerrainNoise noise)
         {
             int side = resolution + 1;
-            Vector3[] vertices = new Vector3[side * side];
-            Vector3[] normals = new Vector3[vertices.Length];
-            Vector2[] uvs = new Vector2[vertices.Length];
-            int[] triangles = new int[resolution * resolution * 6];
             float spacing = chunkSize / resolution;
             float derivativeStep = spacing * 0.5f;
+            int sampleSide = resolution * 2 + 3;
+            float worldBaseX = chunkX * chunkSize;
+            float worldBaseZ = chunkZ * chunkSize;
+
+            for (int zIndex = 0; zIndex < sampleSide; zIndex++)
+            {
+                float worldZ = worldBaseZ + (zIndex - 1) * derivativeStep;
+                int rowStart = zIndex * sampleSide;
+                for (int xIndex = 0; xIndex < sampleSide; xIndex++)
+                {
+                    float worldX = worldBaseX + (xIndex - 1) * derivativeStep;
+                    sampledHeights[rowStart + xIndex] = noise.GetHeight(worldX, worldZ);
+                }
+            }
 
             for (int zIndex = 0; zIndex <= resolution; zIndex++)
             {
@@ -125,140 +143,95 @@ namespace TerraIncognita.World
                     int vertexIndex = zIndex * side + xIndex;
                     float localX = xIndex * spacing;
                     float localZ = zIndex * spacing;
-                    float worldX = chunkX * chunkSize + localX;
-                    float worldZ = chunkZ * chunkSize + localZ;
-
-                    vertices[vertexIndex] = new Vector3(
+                    int sampleIndex = (zIndex * 2 + 1) * sampleSide + xIndex * 2 + 1;
+                    terrainVertices[vertexIndex] = new Vector3(
                         localX,
-                        noise.GetHeight(worldX, worldZ),
+                        sampledHeights[sampleIndex],
                         localZ);
 
-                    float leftHeight = noise.GetHeight(worldX - derivativeStep, worldZ);
-                    float rightHeight = noise.GetHeight(worldX + derivativeStep, worldZ);
-                    float downHeight = noise.GetHeight(worldX, worldZ - derivativeStep);
-                    float upHeight = noise.GetHeight(worldX, worldZ + derivativeStep);
-                    normals[vertexIndex] = new Vector3(
-                        leftHeight - rightHeight,
+                    terrainNormals[vertexIndex] = new Vector3(
+                        sampledHeights[sampleIndex - 1] - sampledHeights[sampleIndex + 1],
                         derivativeStep * 2f,
-                        downHeight - upHeight).normalized;
-                    uvs[vertexIndex] = new Vector2(
+                        sampledHeights[sampleIndex - sampleSide] -
+                        sampledHeights[sampleIndex + sampleSide]).normalized;
+                    terrainUvs[vertexIndex] = new Vector2(
                         localX / chunkSize,
                         localZ / chunkSize);
                 }
             }
 
-            int triangleIndex = 0;
-            for (int zIndex = 0; zIndex < resolution; zIndex++)
-            {
-                for (int xIndex = 0; xIndex < resolution; xIndex++)
-                {
-                    int bottomLeft = zIndex * side + xIndex;
-                    int bottomRight = bottomLeft + 1;
-                    int topLeft = bottomLeft + side;
-                    int topRight = topLeft + 1;
-
-                    triangles[triangleIndex++] = bottomLeft;
-                    triangles[triangleIndex++] = topLeft;
-                    triangles[triangleIndex++] = bottomRight;
-                    triangles[triangleIndex++] = bottomRight;
-                    triangles[triangleIndex++] = topLeft;
-                    triangles[triangleIndex++] = topRight;
-                }
-            }
-
-            Mesh mesh = new Mesh
-            {
-                name = $"Terrain Mesh ({chunkX}, {chunkZ})",
-                vertices = vertices,
-                normals = normals,
-                uv = uvs,
-                triangles = triangles
-            };
-            mesh.RecalculateBounds();
-            return mesh;
+            terrainMesh.Clear(true);
+            terrainMesh.vertices = terrainVertices;
+            terrainMesh.normals = terrainNormals;
+            terrainMesh.uv = terrainUvs;
+            terrainMesh.triangles = terrainTriangles;
+            terrainMesh.RecalculateBounds();
         }
 
-        private Mesh CreateOceanMesh(float chunkSize, float seaLevel)
+        private void CreateOceanMesh(float chunkSize, float seaLevel)
         {
-            Vector3[] vertices =
-            {
-                new Vector3(0f, seaLevel, 0f),
-                new Vector3(0f, seaLevel, chunkSize),
-                new Vector3(chunkSize, seaLevel, 0f),
-                new Vector3(chunkSize, seaLevel, chunkSize)
-            };
-            int[] triangles = { 0, 1, 2, 2, 1, 3 };
+            oceanVertices[0] = new Vector3(0f, seaLevel, 0f);
+            oceanVertices[1] = new Vector3(0f, seaLevel, chunkSize);
+            oceanVertices[2] = new Vector3(chunkSize, seaLevel, 0f);
+            oceanVertices[3] = new Vector3(chunkSize, seaLevel, chunkSize);
 
-            Mesh mesh = new Mesh
-            {
-                name = "Ocean Surface Mesh",
-                vertices = vertices,
-                triangles = triangles
-            };
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-            return mesh;
+            oceanMesh.Clear(true);
+            oceanMesh.vertices = oceanVertices;
+            oceanMesh.triangles = OceanTriangles;
+            oceanMesh.RecalculateNormals();
+            oceanMesh.RecalculateBounds();
         }
 
-        private Mesh CreateLandMesh(Mesh source, float seaLevel)
+        private void CreateLandMesh(float seaLevel)
         {
-            Vector3[] sourceVertices = source.vertices;
-            Vector3[] sourceNormals = source.normals;
-            Vector2[] sourceUvs = source.uv;
-            int[] sourceTriangles = source.triangles;
-            List<Vector3> vertices = new List<Vector3>();
-            List<Vector3> normals = new List<Vector3>();
-            List<Vector2> uvs = new List<Vector2>();
-            List<int> triangles = new List<int>();
-            TerrainVertex[] input = new TerrainVertex[8];
-            TerrainVertex[] output = new TerrainVertex[8];
+            LandVertices.Clear();
+            LandNormals.Clear();
+            LandUvs.Clear();
+            LandTriangles.Clear();
 
-            for (int index = 0; index < sourceTriangles.Length; index += 3)
+            for (int index = 0; index < terrainTriangles.Length; index += 3)
             {
                 for (int corner = 0; corner < 3; corner++)
                 {
-                    int vertexIndex = sourceTriangles[index + corner];
-                    input[corner] = new TerrainVertex(
-                        sourceVertices[vertexIndex],
-                        sourceNormals[vertexIndex],
-                        sourceUvs[vertexIndex]);
+                    int vertexIndex = terrainTriangles[index + corner];
+                    clipInput[corner] = new TerrainVertex(
+                        terrainVertices[vertexIndex],
+                        terrainNormals[vertexIndex],
+                        terrainUvs[vertexIndex]);
                 }
 
-                int count = ClipAboveSeaLevel(input, 3, output, seaLevel);
+                int count = ClipAboveSeaLevel(clipInput, 3, clipOutput, seaLevel);
                 if (count < 3)
                     continue;
 
-                int firstVertex = vertices.Count;
+                int firstVertex = LandVertices.Count;
                 for (int vertexIndex = 0; vertexIndex < count; vertexIndex++)
                 {
-                    vertices.Add(output[vertexIndex].position);
-                    normals.Add(output[vertexIndex].normal);
-                    uvs.Add(output[vertexIndex].uv);
+                    LandVertices.Add(clipOutput[vertexIndex].position);
+                    LandNormals.Add(clipOutput[vertexIndex].normal);
+                    LandUvs.Add(clipOutput[vertexIndex].uv);
                 }
 
                 for (int vertexIndex = 1; vertexIndex < count - 1; vertexIndex++)
                 {
-                    triangles.Add(firstVertex);
-                    triangles.Add(firstVertex + vertexIndex);
-                    triangles.Add(firstVertex + vertexIndex + 1);
+                    LandTriangles.Add(firstVertex);
+                    LandTriangles.Add(firstVertex + vertexIndex);
+                    LandTriangles.Add(firstVertex + vertexIndex + 1);
                 }
             }
 
-            if (vertices.Count == 0)
-                return null;
+            landMesh.Clear(true);
+            if (LandVertices.Count == 0)
+                return;
 
-            Mesh mesh = new Mesh
-            {
-                name = $"{name} Land Navigation Mesh"
-            };
-            if (vertices.Count > 65535)
-                mesh.indexFormat = IndexFormat.UInt32;
-            mesh.vertices = vertices.ToArray();
-            mesh.normals = normals.ToArray();
-            mesh.uv = uvs.ToArray();
-            mesh.triangles = triangles.ToArray();
-            mesh.RecalculateBounds();
-            return mesh;
+            landMesh.indexFormat = LandVertices.Count > 65535
+                ? IndexFormat.UInt32
+                : IndexFormat.UInt16;
+            landMesh.SetVertices(LandVertices);
+            landMesh.SetNormals(LandNormals);
+            landMesh.SetUVs(0, LandUvs);
+            landMesh.SetTriangles(LandTriangles, 0, false);
+            landMesh.RecalculateBounds();
         }
 
         private static int ClipAboveSeaLevel(
@@ -299,7 +272,71 @@ namespace TerraIncognita.World
 
         private void OnDestroy()
         {
-            ReleaseMeshes();
+            DetachMeshes();
+            if (terrainMesh != null)
+                DestroyMesh(terrainMesh);
+            if (landMesh != null)
+                DestroyMesh(landMesh);
+            if (oceanMesh != null)
+                DestroyMesh(oceanMesh);
+        }
+
+        private void EnsureBuffers(int resolution)
+        {
+            if (terrainMesh == null)
+            {
+                terrainMesh = new Mesh();
+                terrainMesh.MarkDynamic();
+            }
+            if (landMesh == null)
+            {
+                landMesh = new Mesh();
+                landMesh.MarkDynamic();
+            }
+            if (oceanMesh == null)
+            {
+                oceanMesh = new Mesh();
+                oceanMesh.MarkDynamic();
+            }
+
+            if (bufferResolution == resolution)
+                return;
+
+            int side = resolution + 1;
+            terrainVertices = new Vector3[side * side];
+            terrainNormals = new Vector3[terrainVertices.Length];
+            terrainUvs = new Vector2[terrainVertices.Length];
+            terrainTriangles = new int[resolution * resolution * 6];
+            sampledHeights = new float[(resolution * 2 + 3) * (resolution * 2 + 3)];
+
+            int triangleIndex = 0;
+            for (int zIndex = 0; zIndex < resolution; zIndex++)
+            {
+                for (int xIndex = 0; xIndex < resolution; xIndex++)
+                {
+                    int bottomLeft = zIndex * side + xIndex;
+                    int bottomRight = bottomLeft + 1;
+                    int topLeft = bottomLeft + side;
+                    int topRight = topLeft + 1;
+
+                    terrainTriangles[triangleIndex++] = bottomLeft;
+                    terrainTriangles[triangleIndex++] = topLeft;
+                    terrainTriangles[triangleIndex++] = bottomRight;
+                    terrainTriangles[triangleIndex++] = bottomRight;
+                    terrainTriangles[triangleIndex++] = topLeft;
+                    terrainTriangles[triangleIndex++] = topRight;
+                }
+            }
+
+            LandVertices.Capacity = Mathf.Max(
+                LandVertices.Capacity,
+                resolution * resolution * 8);
+            LandNormals.Capacity = Mathf.Max(LandNormals.Capacity, resolution * resolution * 8);
+            LandUvs.Capacity = Mathf.Max(LandUvs.Capacity, resolution * resolution * 8);
+            LandTriangles.Capacity = Mathf.Max(
+                LandTriangles.Capacity,
+                resolution * resolution * 12);
+            bufferResolution = resolution;
         }
 
         private readonly struct TerrainVertex

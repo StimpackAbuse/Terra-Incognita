@@ -109,6 +109,7 @@ namespace TerraIncognita.EditorTools
 
             Vector3 originalCameraPosition = camera.transform.position;
             InvokePrivate(world, "Awake");
+            SetPrivateField(world, "maxChunksPerFrame", int.MaxValue);
             InvokePrivate(world, "LateUpdate");
 
             if (world.ActiveChunkCount == 0)
@@ -314,12 +315,16 @@ namespace TerraIncognita.EditorTools
         private static void ValidateWrappedNavigationCoordinates(PeriodicTerrainWorld world)
         {
             float halfWidth = world.WorldWidth * 0.5f;
-            Vector3 nearest = world.GetNearestWrappedPosition(
+            ValidateNearestWrappedImage(
+                world,
                 new Vector3(halfWidth - 2f, 0f, 0f),
-                new Vector3(-halfWidth + 3f, 0f, 0f));
-            if (Mathf.Abs(nearest.x - (halfWidth + 3f)) > 0.001f)
-                throw new InvalidOperationException(
-                    "The unit destination did not choose the nearest image across the world seam.");
+                new Vector3(-halfWidth + 3f, 0f, 0f),
+                halfWidth + 3f);
+            ValidateNearestWrappedImage(
+                world,
+                new Vector3(-halfWidth + 2f, 0f, 0f),
+                new Vector3(halfWidth - 3f, 0f, 0f),
+                -halfWidth - 3f);
 
             Vector3 wrapped = new Vector3(halfWidth + 2f, 0f, 0f);
             if (!world.TryWrapPosition(ref wrapped) ||
@@ -327,6 +332,21 @@ namespace TerraIncognita.EditorTools
             {
                 throw new InvalidOperationException(
                     "The unit position did not wrap to the matching point across the world seam.");
+            }
+        }
+
+        private static void ValidateNearestWrappedImage(
+            PeriodicTerrainWorld world,
+            Vector3 cameraPosition,
+            Vector3 unitPosition,
+            float expectedX)
+        {
+            Vector3 nearest = world.GetNearestWrappedPosition(cameraPosition, unitPosition);
+            if (Mathf.Abs(nearest.x - expectedX) > 0.001f ||
+                Mathf.Abs(nearest.x - cameraPosition.x) > world.WorldWidth * 0.5f)
+            {
+                throw new InvalidOperationException(
+                    "The unit visual did not choose its nearest image across the world seam.");
             }
         }
 
@@ -339,6 +359,18 @@ namespace TerraIncognita.EditorTools
                 throw new InvalidOperationException($"Could not find {methodName} on {target.GetType().Name}.");
 
             method.Invoke(target, null);
+        }
+
+        private static void SetPrivateField(object target, string fieldName, object value)
+        {
+            FieldInfo field = target.GetType().GetField(
+                fieldName,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            if (field == null)
+                throw new InvalidOperationException(
+                    $"Could not find {fieldName} on {target.GetType().Name}.");
+
+            field.SetValue(target, value);
         }
 
         private static void ValidateNoiseSamples()

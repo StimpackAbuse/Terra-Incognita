@@ -1,12 +1,16 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
+using Unity.Profiling;
 
 namespace TerraIncognita.World
 {
     [DisallowMultipleComponent]
     public sealed class PeriodicTerrainWorld : MonoBehaviour
     {
+        private static readonly ProfilerMarker UpdateChunksMarker =
+            new ProfilerMarker("PeriodicTerrainWorld.UpdateChunks");
+
         [Header("World")]
         [SerializeField] private Camera targetCamera;
         [SerializeField] private float worldWidth = 256f;
@@ -24,6 +28,7 @@ namespace TerraIncognita.World
         [SerializeField] private float chunkSize = 32f;
         [SerializeField, Range(8, 128)] private int chunkResolution = 32;
         [SerializeField, Min(0)] private int extraChunkMargin = 1;
+        [SerializeField, Min(1)] private int maxChunksPerFrame = 3;
         [SerializeField] private bool createTerrainColliders = true;
         [SerializeField] private Material terrainMaterial;
         [SerializeField] private Material oceanMaterial;
@@ -31,6 +36,9 @@ namespace TerraIncognita.World
         private readonly Dictionary<Vector2Int, PeriodicTerrainChunk> chunks = new();
         private readonly HashSet<Vector2Int> requiredChunks = new();
         private readonly Stack<PeriodicTerrainChunk> chunkPool = new();
+        private readonly List<Vector2Int> chunksToCreate = new();
+        private readonly List<Vector2Int> chunksToRemove = new();
+        private readonly ChunkDistanceComparer chunkDistanceComparer = new();
         private PeriodicTerrainNoise noise;
         private Transform chunkRoot;
         private Transform navigationInterest;
@@ -43,6 +51,20 @@ namespace TerraIncognita.World
         public int ActiveChunkCount => chunks.Count;
         public int PooledChunkCount => chunkPool.Count;
         public int ChunkVersion => chunkVersion;
+        public float LastChunkChangeTime { get; private set; }
+        public bool AreRequiredChunksLoaded
+        {
+            get
+            {
+                foreach (Vector2Int key in requiredChunks)
+                {
+                    if (!chunks.ContainsKey(key))
+                        return false;
+                }
+
+                return true;
+            }
+        }
 
         private void Awake()
         {
@@ -180,6 +202,14 @@ namespace TerraIncognita.World
 
         private void UpdateVisibleChunks()
         {
+            using (UpdateChunksMarker.Auto())
+            {
+                UpdateVisibleChunksInternal();
+            }
+        }
+
+        private void UpdateVisibleChunksInternal()
+        {
             float viewDown = Mathf.Abs(Vector3.Dot(targetCamera.transform.forward, Vector3.down));
             float halfHeight = targetCamera.orthographic
                 ? targetCamera.orthographicSize
@@ -206,41 +236,50 @@ namespace TerraIncognita.World
                     interestRadius);
             }
 
-            bool chunksChanged = false;
+            chunksToCreate.Clear();
             foreach (Vector2Int key in requiredChunks)
             {
                 if (chunks.ContainsKey(key))
                     continue;
 
-                CreateChunk(key);
-                chunksChanged = true;
+                chunksToCreate.Add(key);
             }
 
-            List<Vector2Int> chunksToRemove = null;
-            foreach (KeyValuePair<Vector2Int, PeriodicTerrainChunk> entry in chunks)
-            {
-                if (requiredChunks.Contains(entry.Key))
-                    continue;
+            chunkDistanceComparer.SetReference(
+                cameraPosition,
+                chunkSize);
+            chunksToCreate.Sort(chunkDistanceComparer);
 
-                if (chunksToRemove == null)
-                    chunksToRemove = new List<Vector2Int>();
-                chunksToRemove.Add(entry.Key);
+            int createCount = Mathf.Min(maxChunksPerFrame, chunksToCreate.Count);
+            for (int index = 0; index < createCount; index++)
+            {
+                CreateChunk(chunksToCreate[index]);
             }
 
-            if (chunksToRemove == null)
-                return;
-
-            foreach (Vector2Int key in chunksToRemove)
+            chunksToRemove.Clear();
+            if (createCount == chunksToCreate.Count)
             {
+                foreach (KeyValuePair<Vector2Int, PeriodicTerrainChunk> entry in chunks)
+                {
+                    if (!requiredChunks.Contains(entry.Key))
+                        chunksToRemove.Add(entry.Key);
+                }
+            }
+
+            for (int index = 0; index < chunksToRemove.Count; index++)
+            {
+                Vector2Int key = chunksToRemove[index];
                 PeriodicTerrainChunk chunk = chunks[key];
                 chunk.gameObject.SetActive(false);
                 chunkPool.Push(chunk);
                 chunks.Remove(key);
-                chunksChanged = true;
             }
 
-            if (chunksChanged)
+            if (createCount > 0 || chunksToRemove.Count > 0)
+            {
                 chunkVersion++;
+                LastChunkChangeTime = Time.time;
+            }
         }
 
         private void AddCameraChunks(
@@ -310,7 +349,6 @@ namespace TerraIncognita.World
                 oceanMaterial,
                 createTerrainColliders);
             chunks.Add(key, chunk);
-            chunkVersion++;
         }
 
         private void EnsureNoiseInitialized()
@@ -342,6 +380,30 @@ namespace TerraIncognita.World
             persistence = Mathf.Clamp01(persistence);
             heightAmplitude = Mathf.Max(0f, heightAmplitude);
             extraChunkMargin = Mathf.Max(0, extraChunkMargin);
+            maxChunksPerFrame = Mathf.Max(1, maxChunksPerFrame);
+        }
+
+        private sealed class ChunkDistanceComparer : IComparer<Vector2Int>
+        {
+            private Vector3 referencePosition;
+            private float chunkSize;
+
+            public void SetReference(Vector3 position, float size)
+            {
+                referencePosition = position;
+                chunkSize = size;
+            }
+
+            public int Compare(Vector2Int first, Vector2Int second)
+            {
+                float firstX = (first.x + 0.5f) * chunkSize - referencePosition.x;
+                float firstZ = (first.y + 0.5f) * chunkSize - referencePosition.z;
+                float secondX = (second.x + 0.5f) * chunkSize - referencePosition.x;
+                float secondZ = (second.y + 0.5f) * chunkSize - referencePosition.z;
+                float firstDistance = firstX * firstX + firstZ * firstZ;
+                float secondDistance = secondX * secondX + secondZ * secondZ;
+                return firstDistance.CompareTo(secondDistance);
+            }
         }
     }
 }

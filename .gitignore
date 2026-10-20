@@ -14,7 +14,9 @@
 
 # MemoryCaptures can get excessive in size.
 # They also could contain extremely sensitive data
+# Also add ProfilerCaptures to avoid accidentally committing profiling data
 /[Mm]emoryCaptures/
+/[Pp]rofilerCaptures/
 
 # Recordings can get excessive in size
 /[Rr]ecordings/

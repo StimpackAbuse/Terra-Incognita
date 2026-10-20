@@ -1,3 +1,4 @@
+using System.Collections;
 using TerraIncognita.Data;
 using TerraIncognita.Unit;
 using TerraIncognita.World;
@@ -5,6 +6,7 @@ using Unity.AI.Navigation;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.InputSystem;
+using Unity.Profiling;
 using RTSUnit = TerraIncognita.Unit.Unit;
 
 namespace TerraIncognita.Core
@@ -12,6 +14,9 @@ namespace TerraIncognita.Core
     [DisallowMultipleComponent]
     public sealed class PeriodicTerrainMovementPrototype : MonoBehaviour
     {
+        private static readonly ProfilerMarker NavMeshUpdateMarker =
+            new ProfilerMarker("PeriodicTerrainMovementPrototype.NavMeshUpdate");
+
         [SerializeField] private PeriodicTerrainWorld terrainWorld;
         [SerializeField] private Camera prototypeCamera;
         [SerializeField] private UnitData testUnitData;
@@ -20,12 +25,14 @@ namespace TerraIncognita.Core
         private NavMeshSurface navMeshSurface;
         private UnitMovement testUnitMovement;
         private Transform testUnitTransform;
+        private Transform testUnitVisual;
         private NavMeshAgent testAgent;
         private AsyncOperation navMeshUpdate;
         private int bakedChunkVersion = -1;
         private string status = "Starting prototype...";
+        private bool isReady;
 
-        private void Start()
+        private IEnumerator Start()
         {
             if (terrainWorld == null)
                 terrainWorld = FindFirstObjectByType<PeriodicTerrainWorld>();
@@ -38,14 +45,19 @@ namespace TerraIncognita.Core
                     "[PeriodicTerrainMovementPrototype] Assign the terrain world, camera, and test UnitData.",
                     this);
                 enabled = false;
-                return;
+                yield break;
             }
 
             terrainWorld.RefreshChunks();
+            while (!terrainWorld.AreRequiredChunksLoaded)
+                yield return null;
+
             Vector3 spawnPosition = FindSpawnPosition();
             CreateTestUnit(spawnPosition);
             terrainWorld.RegisterNavigationInterest(testUnitTransform);
             terrainWorld.RefreshChunks();
+            while (!terrainWorld.AreRequiredChunksLoaded)
+                yield return null;
 
             navMeshSurface = terrainWorld.GetComponent<NavMeshSurface>();
             if (navMeshSurface == null)
@@ -56,8 +68,20 @@ namespace TerraIncognita.Core
             navMeshSurface.useGeometry = NavMeshCollectGeometry.PhysicsColliders;
             navMeshSurface.layerMask = ~(1 << 2);
             navMeshSurface.ignoreNavMeshAgent = true;
-            navMeshSurface.BuildNavMesh();
             bakedChunkVersion = terrainWorld.ChunkVersion;
+            navMeshSurface.navMeshData = new NavMeshData(testAgent.agentTypeID);
+            navMeshSurface.AddData();
+            navMeshUpdate = StartNavMeshUpdate();
+            if (navMeshUpdate == null)
+            {
+                Debug.LogError(
+                    "[PeriodicTerrainMovementPrototype] Could not start the initial asynchronous NavMesh build.",
+                    navMeshSurface);
+                enabled = false;
+                yield break;
+            }
+            yield return navMeshUpdate;
+            navMeshUpdate = null;
 
             if (!NavMesh.SamplePosition(
                     spawnPosition + Vector3.up,
@@ -70,7 +94,7 @@ namespace TerraIncognita.Core
                     this);
                 status = "NavMesh spawn failed; check the terrain and navigation console.";
                 enabled = false;
-                return;
+                yield break;
             }
 
             if (!testAgent.Warp(hit.position))
@@ -80,28 +104,54 @@ namespace TerraIncognita.Core
                     testAgent);
                 status = "Unit placement failed; check the navigation console.";
                 enabled = false;
-                return;
+                yield break;
             }
 
             status = "Right-click land to move. Press F to focus the unit.";
+            isReady = true;
         }
 
         private void Update()
         {
+            if (!isReady)
+                return;
+
             if (Mouse.current != null && Mouse.current.rightButton.wasPressedThisFrame)
                 IssueMoveCommand();
 
             if (Keyboard.current != null && Keyboard.current.fKey.wasPressedThisFrame)
                 FocusCameraOnUnit();
 
-            if (navMeshUpdate == null || navMeshUpdate.isDone)
+            if (navMeshUpdate != null && navMeshUpdate.isDone)
             {
                 navMeshUpdate = null;
-                if (terrainWorld.ChunkVersion != bakedChunkVersion)
+            }
+
+            if (navMeshUpdate == null &&
+                navMeshSurface != null &&
+                terrainWorld.ChunkVersion != bakedChunkVersion &&
+                Time.time >= terrainWorld.LastChunkChangeTime + 1.25f)
+            {
+                int versionToBake = terrainWorld.ChunkVersion;
+                navMeshUpdate = StartNavMeshUpdate();
+                if (navMeshUpdate == null)
                 {
-                    navMeshUpdate = navMeshSurface.UpdateNavMesh(navMeshSurface.navMeshData);
-                    bakedChunkVersion = terrainWorld.ChunkVersion;
+                    Debug.LogError(
+                        "[PeriodicTerrainMovementPrototype] Could not start the asynchronous NavMesh update.",
+                        navMeshSurface);
                 }
+                else
+                {
+                    bakedChunkVersion = versionToBake;
+                }
+            }
+        }
+
+        private AsyncOperation StartNavMeshUpdate()
+        {
+            using (NavMeshUpdateMarker.Auto())
+            {
+                return navMeshSurface.UpdateNavMesh(navMeshSurface.navMeshData);
             }
         }
 
@@ -165,6 +215,7 @@ namespace TerraIncognita.Core
             visual.transform.SetParent(unitObject.transform, false);
             visual.transform.localPosition = Vector3.up;
             visual.transform.localScale = new Vector3(0.7f, 1f, 0.7f);
+            testUnitVisual = visual.transform;
             Collider visualCollider = visual.GetComponent<Collider>();
             if (visualCollider != null)
                 visualCollider.enabled = false;
@@ -215,6 +266,16 @@ namespace TerraIncognita.Core
 
         private void LateUpdate()
         {
+            if (testUnitVisual != null && testUnitTransform != null && prototypeCamera != null)
+            {
+                Vector3 visualPosition = terrainWorld.GetNearestWrappedPosition(
+                    prototypeCamera.transform.position,
+                    testUnitTransform.position);
+                visualPosition.y = testUnitTransform.position.y + 1f;
+                visualPosition.z = testUnitTransform.position.z;
+                testUnitVisual.position = visualPosition;
+            }
+
             if (testAgent != null && testAgent.isOnNavMesh && testAgent.hasPath)
             {
                 status = $"Unit {testAgent.pathStatus}; remaining {testAgent.remainingDistance:F1} m.";
